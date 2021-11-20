@@ -1,0 +1,149 @@
+from gensim.models.doc2vec import TaggedDocument
+from gensim.models import Doc2Vec
+from gensim.test.utils import get_tmpfile
+from sklearn.model_selection import train_test_split
+from sklearn import svm
+from sklearn.preprocessing import LabelEncoder
+import argparse
+import joblib
+from dask.distributed import Client
+import os
+
+def process_csv(csv_filename):
+    import pandas as pd
+
+    df = pd.read_csv(csv_filename)
+
+    df[df.isnull().any(axis=1)]
+    df.drop(df[df.isnull().any(axis=1)].index, inplace=True)
+
+    return df
+
+def train_d2v_model(model, labelled_ngrams, n_epochs):
+
+    model.build_vocab(labelled_ngrams)
+
+    for epoch in range(n_epochs):
+        model.train(labelled_ngrams, epochs=model.epochs,
+                                total_examples=model.corpus_count)
+        print("Epoch #{} is complete.".format(epoch+1))
+
+    return model
+
+def save_d2v_model(model, fpath):
+    from gensim.test.utils import get_tmpfile
+
+    fname = get_tmpfile(fpath)
+    model.save(fname)
+
+def load_d2v_model(fpath):
+    from gensim.test.utils import get_tmpfile
+
+    fname = get_tmpfile(fpath)
+    return Doc2Vec.load(fname)
+
+def save_clf(clf, fpath):
+    import joblib
+
+    joblib.dump(clf, fpath)
+
+def load_clf(fpath):
+
+    import joblib
+
+    return joblib.load(fpath)
+
+def print_stats(y_pred, y_test):
+    from sklearn import metrics
+
+    print("Accuracy = " + str(metrics.accuracy_score(y_test, y_pred)))
+    print("Precision = " + str(metrics.precision_score(y_test, y_pred)))
+
+def main():
+
+    parser = argparse.ArgumentParser(description="machine learning model")
+    parser.add_argument('-c', '--csv_filename', default=None,
+            help='filename for the csv dataset')
+    parser.add_argument('-d', '--debug', action='store_true',
+            help='turn on debug statements')
+
+    args = parser.parse_args()
+
+    if args.csv_filename:
+        csv_filename = args.csv_filename
+    else:
+        parser.print_help()
+        exit()
+    if args.debug:
+        debug = True
+    else:
+        debug = False
+
+    if debug:
+        print("Starting to read CSV")
+    df = process_csv(csv_filename)
+
+    if debug:
+        print("Read CSV ---> DONE!")
+
+    try:
+        test_num = args.csv_filename.rsplit("/")[-1].rsplit("_")[0]
+    except:
+        test_num = 0
+
+    if debug:
+        print("Starting to process ngrams")
+
+    ngrams = df['ngram']
+    labelled_ngrams = []
+    for i in range(len(ngrams)):
+        labelled_ngrams.append(TaggedDocument(ngrams[i].split(), [i]))
+
+    if debug:
+        print("Process ngrams ---> DONE!")
+    print(labelled_ngrams)
+    if debug:
+        print("Creating model")
+    model = Doc2Vec(dm=1, min_count=1, window=10, vector_size=150,
+            sample=1e-4, negative=10)
+    if debug:
+        print("Model --> CREATED!")
+    if debug:
+        print("Training model")
+    trained_model = train_d2v_model(model, labelled_ngrams, n_epochs=20)
+    if debug:
+        print("Model --> TRAINED!")
+
+    d2v_path = os.path.join(os.getcwd(), "doc2vec_model{}".format(test_num))
+    save_d2v_model(trained_model, d2v_path)
+
+    model_loaded = load_d2v_model(d2v_path)
+
+    le = LabelEncoder()
+    le.fit(["Benign", "Malware"])
+    target = le.transform(df['label'])
+
+    data = []
+    for i in range(len(df['ngram'])):
+        data.append(model_loaded[i])
+
+    x_train, x_test, y_train, y_test = train_test_split(data, target,
+            test_size=0.3, random_state=0)
+    client = Client(processes=False)
+
+    clf = svm.SVC(kernel='linear')
+
+    with joblib.parallel_backend('dask'):
+        clf.fit(x_train, y_train)
+
+
+    y_pred = clf.predict(x_test)
+
+    clf_path = "/home/amanjain/NLP-Malware/ml/model{}.pkl".format(test_num)
+    save_clf(clf, clf_path)
+
+    print(y_pred)
+    print_stats(y_pred, y_test)
+
+if __name__ == "__main__":
+    main()
